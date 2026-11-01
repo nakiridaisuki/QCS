@@ -1,0 +1,21 @@
+build/
+__pycache__/
+*.py[cod]
+.venv/
+
+# downloaded MQT Bench circuits (make benchmarks) and generated IR circuits
+benchmarks/*.qasm
+single_gate/scripts/circuits_ucx/
+single_gate/scripts/circuits_native/
+
+# cached Qiskit reference states (regenerate with verify_state.py)
+benchmarks/.ref_*.npy
+
+# local run output
+results/
+logs/
+circuits/
+
+# container images / build intermediates
+*.sif
+*.tar
