@@ -55,6 +55,7 @@ case "$name" in
 esac
 
 out="benchmarks/${key}.qasm"
+mkdir -p benchmarks
 zip=$(mktemp --suffix=.zip)
 trap 'rm -f "$zip"' EXIT
 
