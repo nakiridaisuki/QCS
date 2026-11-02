@@ -35,6 +35,11 @@ sg_init() { # [table-name]  (default: script basename without .sh)
 }
 
 sg_env() {
+    # nsys/ncu scratch: compute nodes are shared, so /tmp/nvidia may belong to
+    # another user (job 672034 died on hgpn008 with Permission denied).  SLURM
+    # pre-sets TMPDIR, so override unconditionally.
+    export TMPDIR=/tmp/quantum-$(id -un)-${SLURM_JOB_ID:-local}
+    mkdir -p "$TMPDIR"
     export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
     export PATH="$CUDA_HOME/bin:$PATH"
     export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"

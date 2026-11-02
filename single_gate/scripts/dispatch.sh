@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Host-side dispatcher: run a table inside the single-gate container.
+# Host-side dispatcher: build binaries / produce a stamp inside the container.
 #   dispatch.sh build
-#   dispatch.sh run  X.Y.Z
-#   dispatch.sh parse X.Y.Z
+#   dispatch.sh stamp <stamp-path>
 set -euo pipefail
 
 mode=${1:?usage: dispatch.sh build|run|parse <id>}
@@ -74,18 +73,8 @@ fi
 case "$mode" in
     build)
         choose; container_make "$RUNNER_SELECTED" single ;;
-    parse)
-        [ $# -eq 1 ] || { echo "usage: dispatch.sh parse ID" >&2; exit 1; }
-        choose; container_make "$RUNNER_SELECTED" single_parse ID="$1" ;;
-    run)
-        [ $# -eq 1 ] || { echo "usage: dispatch.sh run ID" >&2; exit 1; }
-        id=$1
-        if [ "${SLURM:-0}" = "1" ]; then
-            mkdir -p single_gate/results/raw
-            echo "submitting $id ..." >&2
-            sbatch ${SBATCH_ARGS:-} --parsable single_gate/jobs/slurm_container.sh "$id"
-        else
-            choose; container_make "$RUNNER_SELECTED" single "$id"
-        fi ;;
+    stamp)
+        [ $# -eq 1 ] || { echo "usage: dispatch.sh stamp <path>" >&2; exit 1; }
+        choose; container_make "$RUNNER_SELECTED" "$1" ;;
     *) echo "unknown mode: $mode" >&2; exit 2 ;;
 esac

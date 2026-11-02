@@ -49,6 +49,18 @@ RE_KLINE = re.compile(r"^kernel_line\s+:\s+(\d+)\s+\|\|\s+([0-9.]+)\s+\|\|\s+(.+
 RE_OPLINE = re.compile(r"^op_line\s+:\s+(\d+)\s+\|\|\s+([0-9.]+)\s+\|\|\s+(.+)$")
 # "########## side=ours circuit=qft_n25 prec=fp32 ##########"
 RE_SIDE = re.compile(r"^#+\s+side=(\S+)\s+circuit=(\S+)\s+prec=(fp32|fp64)\s*#*\s*$")
+
+# Each suite's raw prefix, plus the legacy prefixes whose measurements moved
+# into that suite unchanged.
+SRC_OF = {
+    "suite_ours":       ("suite_ours", "suite_circuits", "sec3.0.1"),
+    "suite_cudaq":      ("suite_cudaq", "suite_circuits", "sec4.1.1", "sec4.2.1", "sec4.3.1"),
+    "suite_nsys":       ("suite_nsys", "sec7.2.1", "sec7.2.2", "sec4.3.2", "sec4.3.3"),
+    "suite_bench_gate": ("suite_bench_gate", "sec7.1.1", "sec7.2.3", "sec7.3.1", "sec7.3.2"),
+}
+
+def from_src(row, suite):
+    return any(row["src"].startswith(p) for p in SRC_OF[suite])
 def parse(paths: list[Path]):
     whole, d2h, per_gate, positions, cudaq, nsys = [], [], [], [], [], []
     unparsed = Counter()
@@ -180,20 +192,21 @@ def parse(paths: list[Path]):
 
 
 TABLES = {
-    "3.0.1":  ("§3 whole circuit, u/cx: cuStateVec vs local gate", "sec3.0.1_whole_circuit.sh"),
-    "4.1.1":  ("§4.1 CUDA-Q nvidia state vector, wall time + D2H", "sec4.1.1_cudaq_statevector.sh"),
-    "4.2.1":  ("§4.2 tensornet / tensornet-mps", "sec4.2.1_cudaq_tensornet.sh"),
-    "4.3.1":  ("§4.3 CUDA-Q fusion on vs off", "sec4.3.1_cudaq_fusion.sh"),
-    "4.3.2":  ("§4.3 GPU kernel sum, fusion on vs off (nsys)", "sec4.3.2_cudaq_kernel_sum.sh"),
-    "4.3.3":  ("§4.3 kernel names and counts (nsys)", "sec4.3.3_cudaq_kernels.sh"),
-    "6.2.1":  ("§6.2 u/cx vs native decomposition, local gate", "sec6.2.1_native_speedup.sh"),
-    "7.0.1":  ("§7 same decomposition, whole circuits", "sec7.0.1_same_decomposition.sh"),
-    "7.1.1":  ("§7.1 D2H bandwidth by n", "sec7.1.1_d2h.sh"),
-    "7.2.1":  ("§7.2 qft_n20/23/25 kernel sum, ours vs CUDA-Q fusion off", "sec7.2.1_kernel_sums.sh"),
-    "7.2.2":  ("§7.2 qft_n25 per-operation time", "sec7.2.2_per_operation.sh"),
-    "7.2.3":  ("§7.2 one gate of each kind, ours vs cuStateVec", "sec7.2.3_per_gate.sh"),
-    "7.3.1":  ("§7.3 u at every target position", "sec7.3.1_u_target_sweep.sh"),
-    "7.3.2":  ("§7.3 swap/cp/cx swept over bit positions", "sec7.3.2_bit_positions.sh"),
+    "3.0.1":  ("§3 whole circuit, u/cx: cuStateVec vs local gate", "suite_ours.sh"),
+    "final":  ("final result: u/cx vs native, NV vs ours", "(parse-only: reads 3.0.1 + 7.2.1)"),
+    "4.1.1":  ("§4.1 CUDA-Q nvidia state vector, wall time + D2H", "suite_cudaq.sh"),
+    "4.2.1":  ("§4.2 tensornet / tensornet-mps", "suite_cudaq.sh"),
+    "4.3.1":  ("§4.3 CUDA-Q fusion on vs off", "suite_cudaq.sh"),
+    "4.3.2":  ("§4.3 GPU kernel sum, fusion on vs off (nsys)", "suite_nsys_trace.sh + suite_nsys_reduce.sh"),
+    "4.3.3":  ("§4.3 kernel names and counts (nsys)", "suite_nsys_trace.sh + suite_nsys_reduce.sh"),
+    "6.2.1":  ("§6.2 u/cx vs native decomposition, local gate", "suite_ours.sh + suite_nsys_*"),
+    "7.0.1":  ("§7 same decomposition, whole circuits", "suite_nsys_* + suite_cudaq.sh"),
+    "7.1.1":  ("§7.1 D2H bandwidth by n", "suite_bench_gate.sh"),
+    "7.2.1":  ("§7.2 qft_n20/23/25 kernel sum, ours vs CUDA-Q fusion off", "suite_nsys_trace.sh + suite_nsys_reduce.sh"),
+    "7.2.2":  ("§7.2 qft_n25 per-operation time", "suite_nsys_trace.sh + suite_nsys_reduce.sh"),
+    "7.2.3":  ("§7.2 one gate of each kind, ours vs cuStateVec", "suite_bench_gate.sh"),
+    "7.3.1":  ("§7.3 u at every target position", "suite_bench_gate.sh"),
+    "7.3.2":  ("§7.3 swap/cp/cx swept over bit positions", "suite_bench_gate.sh"),
 }
 
 
@@ -208,31 +221,42 @@ def print_tables_index():
 def render_table(tid, whole, d2h, per_gate, positions, cudaq, nsys):
     """Return the markdown for one table, or a message saying what is missing."""
     if tid == "7.0.1":
-        best = {}
+        ours = {}
         for r in whole:
-            if not r["src"].startswith("sec7.0.1") or r["who"] != "local-gate":
+            # native IR runs: "-- native" in the nsys suite's warm-up prints,
+            # or the legacy sec7.0.1 raws (native rows there read local-gate)
+            if r["src"].startswith("sec7.0.1"):
+                if (r["gates"] or 0) >= 900:
+                    continue
+            elif from_src(r, "suite_nsys"):
+                if r["who"] != "native":
+                    continue
+            else:
                 continue
-            k = (r["circuit"], r["prec"])
-            best[k] = r  # latest raw file wins (files are read in sorted order)
+            ours[(r["circuit"], r["prec"])] = r["ms"]  # last wins
         cq = {}
         for r in cudaq:
-            if r["src"].startswith("sec7.0.1") and r.get("form") == "banner":
+            if ((from_src(r, "suite_cudaq") or r["src"].startswith("sec7.0.1"))
+                    and r.get("form") == "banner" and r.get("fusion") == "off"):
                 cq[(r["circuit"], r["prec"])] = r
         rows = []
         for circ in ("qft_n20", "qft_n23", "qft_n25"):
+            row = {"電路": circ}
             for prec in ("fp32", "fp64"):
-                o, c = best.get((circ, prec)), cq.get((circ, prec))
-                if not (o and c):
-                    continue
-                rows.append(dict(circuit=f"{circ} {prec}", ours=f"{o['ms']:.2f}",
-                                 **{"cudaq materialize": "n/a" if c.get("materialize") is None else f"{c['materialize']:.2f}",
-                                    "cudaq total": "n/a" if c.get("total") is None else f"{c['total']:.2f}"}))
-        return table(rows, ["circuit", "ours", "cudaq materialize", "cudaq total"]) if rows else None
+                o = ours.get((circ, prec))
+                c = cq.get((circ, prec))
+                mat = c.get("materialize") if c else None
+                row[f"{prec} ours"] = f"{o:.2f}" if o is not None else "n/a"
+                row[f"{prec} CUDA-Q"] = f"{mat:.2f}" if mat is not None else "n/a"
+            rows.append(row)
+        fields = ["電路", "fp32 ours", "fp32 CUDA-Q", "fp64 ours", "fp64 CUDA-Q"]
+        return table(rows, fields) if any(
+            row["fp32 ours"] != "n/a" for row in rows) else None
 
     if tid == "7.1.1":
         best = {}
         for r in d2h:
-            if not r["src"].startswith("sec7.1.1"):
+            if not from_src(r, "suite_bench_gate"):
                 continue
             k = (r["n"], r["prec"])
             best[k] = r  # latest raw file wins
@@ -250,12 +274,12 @@ def render_table(tid, whole, d2h, per_gate, positions, cudaq, nsys):
     if tid == "7.2.3":
         got, pos = {}, {}
         for r in per_gate:
-            if r["src"].startswith("sec7.2.3") and r["n"] == 25 and r["prec"] == "fp32":
-                got[r["op"]] = min(got.get(r["op"], 1e9), r["us"])
+            if from_src(r, "suite_bench_gate") and r["n"] == 25 and r["prec"] == "fp32":
+                got[r["op"]] = r["us"]  # last wins
         for r in positions:
-            if r["src"].startswith("sec7.2.3") and r["n"] == 25 and r["prec"] == "fp32":
+            if from_src(r, "suite_bench_gate") and r["n"] == 25 and r["prec"] == "fp32":
                 k = (r["op"], r["args"])
-                pos[k] = min(pos.get(k, 1e9), r["us"])
+                pos[k] = r["us"]  # last wins
         defs = [
             ("u (target=24)", pos.get(("u", "t=24")), got.get("csv_ApplyMatrix u"), "ApplyMatrix u"),
             ("cp (ctrl=0, tgt=24)", pos.get(("cp", "0,24")), got.get("csv_ApplyMatrix cp(diag)"), "ApplyMatrix cp(diag)"),
@@ -276,7 +300,7 @@ def render_table(tid, whole, d2h, per_gate, positions, cudaq, nsys):
     if tid == "7.3.1":
         best = {}
         for r in positions:
-            if not r["src"].startswith("sec7.3.1") or r["n"] != 25:
+            if not from_src(r, "suite_bench_gate") or r["n"] != 25:
                 continue
             if r["op"] not in ("u", "csv_u"):
                 continue
@@ -286,27 +310,27 @@ def render_table(tid, whole, d2h, per_gate, positions, cudaq, nsys):
                    "t=8", "t=12", "t=23", "t=24"]
         rows = []
         for t in targets:
-            vals = [best.get(("fp32", "u", t)), best.get(("fp64", "u", t)),
-                    best.get(("fp32", "csv_u", t)), best.get(("fp64", "csv_u", t))]
+            vals = [best.get(("fp32", "u", t)), best.get(("fp32", "csv_u", t)),
+                    best.get(("fp64", "u", t)), best.get(("fp64", "csv_u", t))]
             if all(v is None for v in vals):
                 continue
             rows.append(dict(target=t,
                              **{"fp32 ours": f"{vals[0]:.1f}" if vals[0] else "n/a",
-                                "fp64 ours": f"{vals[1]:.1f}" if vals[1] else "n/a",
-                                "fp32 cuStateVec": f"{vals[2]:.1f}" if vals[2] else "n/a",
-                                "fp64 cuStateVec": f"{vals[3]:.1f}" if vals[3] else "n/a"}))
-        return table(rows, ["target", "fp32 ours", "fp64 ours",
-                            "fp32 cuStateVec", "fp64 cuStateVec"]) if rows else None
+                                "fp32 NV": f"{vals[1]:.1f}" if vals[1] else "n/a",
+                                "fp64 ours": f"{vals[2]:.1f}" if vals[2] else "n/a",
+                                "fp64 NV": f"{vals[3]:.1f}" if vals[3] else "n/a"}))
+        return table(rows, ["target", "fp32 ours", "fp32 NV",
+                            "fp64 ours", "fp64 NV"]) if rows else None
 
     if tid == "7.3.2":
         pos, nv = {}, {}
         for r in positions:
-            if r["src"].startswith("sec7.3.2") and r["n"] == 25 and r["prec"] == "fp32":
+            if from_src(r, "suite_bench_gate") and r["n"] == 25 and r["prec"] == "fp32":
                 k = (r["op"], r["args"])
-                pos[k] = min(pos.get(k, 1e9), r["us"])
+                pos[k] = r["us"]  # last wins
         for r in per_gate:
-            if r["src"].startswith("sec7.3.2") and r["n"] == 25 and r["prec"] == "fp32":
-                nv[r["op"]] = min(nv.get(r["op"], 1e9), r["us"])
+            if from_src(r, "suite_bench_gate") and r["n"] == 25 and r["prec"] == "fp32":
+                nv[r["op"]] = r["us"]  # last wins
         want = [("swap", "23,24"), ("swap", "12,24"), ("swap", "12,13"), ("swap", "2,3"),
                 ("swap", "1,2"), ("swap", "0,2"), ("swap", "0,1"), ("swap", "0,24"),
                 ("swap", "0,12"), ("cp", "23,24"), ("cp", "12,13"), ("cp", "0,24"),
@@ -316,30 +340,94 @@ def render_table(tid, whole, d2h, per_gate, positions, cudaq, nsys):
         for label, key in (("NV Permutation swap", "csv_Permutation swap"),
                            ("NV ApplyMatrix cp(diag)", "csv_ApplyMatrix cp(diag)")):
             if key in nv:
-                rows.append(dict(**{"gate / position": f"（對照）{label}", "us": f"{nv[key]:.1f}"}))
+                rows.append(dict(**{"gate / position": label, "us": f"{nv[key]:.1f}"}))
         return table(rows, ["gate / position", "us"]) if rows else None
+
+    if tid == "final":
+        # u/cx rows come from the suite_circuits raws (cudaEvent gate loop,
+        # cuStateVec wrapper vs local gate), native rows from the 7.2.1 raws
+        # (nsys kernel sum, CUDA-Q fusion off vs local gate).  Nothing is
+        # re-measured.
+        ucx, native = {}, {}
+        for r in whole:
+            if not from_src(r, "suite_ours"):
+                continue
+            if r["who"] not in ("custatevec", "local-gate"):
+                continue
+            if not (r["circuit"] or "").startswith("qft_"):
+                continue
+            ucx.setdefault((r["circuit"], r["prec"]), {})[r["who"]] = r["ms"]  # last wins
+        for r in nsys:
+            if r.get("kernel") != "__sum__" or not from_src(r, "suite_nsys"):
+                continue
+            sec = r.get("section") or ""
+            m = re.search(r"circuit=(qft_n\d+)\s+prec=(fp32|fp64)", sec)
+            if not m:
+                continue
+            side = "ours" if "side=ours" in sec else "cudaq"
+            if side == "cudaq" and "fusion=off" not in sec:
+                continue
+            native.setdefault((m.group(1), m.group(2)), {})[side] = r["total_ms"]  # last wins
+        # gate counts for the decomp labels, from the whole-circuit rows
+        ucx_gates, native_gates = {}, {}
+        for r in whole:
+            circ = r["circuit"] or ""
+            if not circ.startswith("qft_"):
+                continue
+            if r["who"] == "local-gate" and (r["gates"] or 0) >= 900:
+                ucx_gates[circ] = r["gates"]
+            elif r["who"] == "native":
+                native_gates[circ] = r["gates"]
+        rows = []
+        for decomp, src, nv_key, our_key, gates in (
+                ("u/cx", ucx, "custatevec", "local-gate", ucx_gates),
+                ("native", native, "cudaq", "ours", native_gates)):
+            for circ in ("qft_n20", "qft_n23", "qft_n25"):
+                g = gates.get(circ)
+                row = {"電路": circ, "分解": f"{decomp}（{g} 閘）" if g else decomp}
+                for prec in ("fp32", "fp64"):
+                    d = src.get((circ, prec)) or {}
+                    nv, ours = d.get(nv_key), d.get(our_key)
+                    row[f"{prec} NV"] = f"{nv:.2f}" if nv else "n/a"
+                    row[f"{prec} ours"] = f"{ours:.2f}" if ours else "n/a"
+                    row[f"{prec} 加速"] = f"{nv / ours:.2f}x".replace("x", "×") if nv and ours else "n/a"
+                rows.append(row)
+        fields = ["電路", "分解", "fp32 NV", "fp32 ours", "fp32 加速",
+                  "fp64 NV", "fp64 ours", "fp64 加速"]
+        return table(rows, fields) if rows else None
 
     if tid == "3.0.1":
         best = {}
         for r in whole:
             if r["who"] not in ("custatevec", "local", "local-gate", "baseline"):
                 continue
-            if not ("sec3" in r["src"] or (r["section"] or "").startswith("3")):
-                if (r["gates"] or 0) < 900:       # native IR, that is §6.2
-                    continue
-            k = (r["n"], r["prec"], r["who"], r["gates"])
-            best[k] = r  # latest raw file wins
-        rows = [dict(circuit=r["circuit"] or f"n={r['n']}", n=r["n"], prec=r["prec"],
-                     who=r["who"], gates=r["gates"], ms=f"{r['ms']:.2f}")
-                for _, r in sorted(best.items(), key=lambda kv: (kv[0][0] or 0, kv[0][1] or "", kv[0][2]))]
-        return table(rows, ["circuit", "n", "prec", "who", "gates", "ms"]) if rows else None
+            if not (r["circuit"] or "").startswith("qft_"):
+                continue                            # vqe_n16 was dropped
+            if not from_src(r, "suite_ours"):
+                continue
+            if (r["gates"] or 0) < 900:           # native IR rows feed 6.2.1/7.0.1
+                continue
+            best[(r["circuit"], r["prec"], r["who"])] = r  # latest raw file wins
+        rows = []
+        for circ in ("qft_n20", "qft_n23", "qft_n25"):
+            row = {"電路": circ}
+            for prec in ("fp32", "fp64"):
+                for who, col in (("custatevec", "cuStateVec"), ("local-gate", "local gate")):
+                    r = best.get((circ, prec, who))
+                    row[f"{prec} {col}"] = f"{r['ms']:.2f}" if r else "n/a"
+                    if r:
+                        row["閘數"] = r["gates"]
+            rows.append(row)
+        fields = ["電路", "閘數", "fp32 cuStateVec", "fp32 local gate",
+                  "fp64 cuStateVec", "fp64 local gate"]
+        return table(rows, fields) if rows else None
 
     if tid == "4.1.1":
         rows = []
         for circ in ("qft_n20", "qft_n23", "qft_n25"):
             vals = {r["prec"]: r["total"] for r in cudaq
-                    if r["src"].startswith("sec4.1.1") and r.get("circuit") == circ
-                    and r.get("total") is not None}
+                    if from_src(r, "suite_cudaq") and r.get("circuit") == circ
+                    and r.get("fusion") == "on" and r.get("total") is not None}
             if vals:
                 rows.append(dict(circuit=circ,
                                  **{"nvidia fp32": f"{vals['fp32']:.2f}" if "fp32" in vals else "n/a",
@@ -350,10 +438,12 @@ def render_table(tid, whole, d2h, per_gate, positions, cudaq, nsys):
         # total where the target exposes a state vector; enqueue-only (marked *)
         # where it does not, so the column is not silently a different quantity.
         rows, fallback = [], False
-        for circ in ("vqe_n16", "qft_n20"):
+        for circ in ("qft_n20",):
             vals = {}
             for r in cudaq:
-                if not r["src"].startswith("sec4.2.1") or r.get("circuit") != circ:
+                if not from_src(r, "suite_cudaq") or r.get("circuit") != circ:
+                    continue
+                if r.get("fusion") != "on" or r.get("prec") != "fp32":
                     continue
                 if r.get("total") is not None:
                     vals[r["target"]] = f"{r['total']:.2f}"
@@ -378,7 +468,7 @@ def render_table(tid, whole, d2h, per_gate, positions, cudaq, nsys):
             vals = {}
             for prec in ("fp32", "fp64"):
                 for r in cudaq:
-                    if (r["src"].startswith("sec4.3.1") and r.get("circuit") == circ
+                    if (from_src(r, "suite_cudaq") and r.get("circuit") == circ
                             and r.get("prec") == prec and r.get("total") is not None):
                         vals[(prec, r["fusion"])] = r["total"]
             if vals:
@@ -392,9 +482,12 @@ def render_table(tid, whole, d2h, per_gate, positions, cudaq, nsys):
     if tid == "4.3.2":
         best = {}
         for r in nsys:
-            if r.get("kernel") != "__sum__" or not r["src"].startswith("sec4.3.2"):
+            if r.get("kernel") != "__sum__" or not from_src(r, "suite_nsys"):
                 continue
-            mode = "fusion off" if "fusion=off" in (r.get("section") or "") else "fusion on"
+            sec = r.get("section") or ""
+            if "circuit=qft_n25" not in sec or "prec=fp32" not in sec:
+                continue
+            mode = "fusion off" if "fusion=off" in sec else "fusion on"
             best[mode] = dict(mode=mode, kernel_sum=f"{r['total_ms']:.2f}")
         rows = [best[m] for m in ("fusion on", "fusion off") if m in best]
         return table(rows, ["mode", "kernel_sum"]) if rows else None
@@ -402,18 +495,26 @@ def render_table(tid, whole, d2h, per_gate, positions, cudaq, nsys):
     if tid == "6.2.1":
         acc = {}
         for r in whole:
-            if not r["src"].startswith("sec6.2.1_native_speedup"):
+            if not (from_src(r, "suite_ours") or from_src(r, "suite_nsys")
+                    or r["src"].startswith("sec6.2.1")):
                 continue
-            if r["who"] not in ("ucx", "native") or r["prec"] not in ("fp32", "fp64"):
+            if r["prec"] not in ("fp32", "fp64"):
                 continue
-            acc.setdefault((r["circuit"], r["prec"], r["who"]), []).append(r["ms"])
+            # the u/cx column reuses the 3.0.1 local-gate runs; the gates count
+            # separates the two IRs (u/cx has ~4-5x more gates)
+            if r["who"] == "local-gate" and (r["gates"] or 0) >= 900:
+                who = "ucx"
+            elif r["who"] == "native":
+                who = "native"
+            else:
+                continue
+            acc[(r["circuit"], r["prec"], who)] = r["ms"]  # last wins
         rows = []
         for circ in ("qft_n20", "qft_n23", "qft_n25"):
             vals = {}
             for prec in ("fp32", "fp64"):
                 for who in ("ucx", "native"):
-                    xs = acc.get((circ, prec, who), [])
-                    vals[(prec, who)] = sum(xs) / len(xs) if xs else None
+                    vals[(prec, who)] = acc.get((circ, prec, who))
             if any(v is not None for v in vals.values()):
                 row = dict(circuit=circ)
                 for prec in ("fp32", "fp64"):
@@ -429,13 +530,16 @@ def render_table(tid, whole, d2h, per_gate, positions, cudaq, nsys):
     if tid == "7.2.1":
         sums = {}
         for r in nsys:
-            if r.get("kernel") != "__sum__" or not r["src"].startswith("sec7.2.1"):
+            if r.get("kernel") != "__sum__" or not from_src(r, "suite_nsys"):
                 continue
             sec = r.get("section") or ""
             m = re.search(r"circuit=(qft_n\d+)\s+prec=(fp32|fp64)", sec)
             if not m:
                 continue
             side = "ours" if "side=ours" in sec else "cudaq"
+            # the suite also profiles fusion on (for 4.3.2/4.3.3); 7.2.1 is off-only
+            if side == "cudaq" and "fusion=off" not in sec:
+                continue
             sums[(m.group(1), m.group(2), side)] = r["total_ms"]
         rows = []
         for circ in ("qft_n20", "qft_n23", "qft_n25"):
@@ -456,7 +560,7 @@ def render_table(tid, whole, d2h, per_gate, positions, cudaq, nsys):
     if tid == "7.2.2":
         vals = {}
         for r in nsys:
-            if not r["src"].startswith("sec7.2.2") or r.get("kernel") == "__sum__":
+            if not from_src(r, "suite_nsys") or r.get("kernel") == "__sum__":
                 continue
             sec = r.get("section") or ""
             m = re.search(r"prec=(fp32|fp64)", sec)
@@ -502,28 +606,33 @@ def render_table(tid, whole, d2h, per_gate, positions, cudaq, nsys):
                 "naivePermutingSetKernel", "setZeroStateKernel")
 
         def targets(name):
-            # ...Kernel<(int)64, CsComplex<float>, (int)5, ...>: the second (int)
-            # is the number of targets the specialisation was compiled for.
+            # ...Kernel<(int)64, CsComplex<float>, (int)5, ...>: the number of
+            # targets the specialisation was compiled for.  LoopKernel carries
+            # an extra (int) before the type: <(int)64, (int)1, T, (int)N, ...>.
             if "matmulKernel_diagonal" in name:
                 return "1"
             ints = re.findall(r"\(int\)(\d+)", name)
+            if "LoopKernel" in name:
+                return ints[2] if len(ints) >= 3 else ""
             return ints[1] if len(ints) >= 2 else ""
 
         best = {}
         for r in nsys:
             if r.get("kernel") == "__sum__" or r.get("inst", 0) <= 0:
                 continue
-            if not r["src"].startswith("sec4.3.3"):
+            if not from_src(r, "suite_nsys"):
                 continue
             sec = r.get("section") or ""
-            if "circuit=qft_n25" not in sec:
+            if "circuit=qft_n25" not in sec or "prec=fp32" not in sec:
                 continue
             if not any(k in r["kernel"] for k in keep):
                 continue
+            # display name is truncated, but the dedup key keeps the full name
+            # (float/double specialisations only differ past char ~70)
             row = dict(mode="fusion off" if "fusion=off" in sec else "fusion on",
                        kernel=r["kernel"][:70], targets=targets(r["kernel"]),
                        inst=r["inst"], total_ms=f"{r['total_ms']:.3f}")
-            best[(row["mode"], row["targets"], row["kernel"])] = row  # latest run wins
+            best[(row["mode"], row["targets"], r["kernel"])] = row  # latest run wins
         rows = sorted(best.values(), key=lambda r: (r["mode"], r["targets"]))
         return table(rows, ["mode", "kernel", "targets", "inst", "total_ms"]) if rows else None
     return None
@@ -633,18 +742,29 @@ def main() -> int:
     if args.table:
         failed = []
         for tid in args.table:
-            if tid not in TABLES:
+            if tid in TABLES:
+                body = render_table(tid, whole, d2h, per_gate, positions, cudaq, nsys)
+                what, script = TABLES[tid]
+                print(f"\n## {tid}  {what}")
+                if body is None:
+                    print(f"   no data for this table in {args.paths[0]}.")
+                    print(f"   run:  single_gate/jobs/{script}")
+                    failed.append(tid)
+                else:
+                    print(body)
+                continue
+            # appendix tables: their job scripts write the CSV; just print it pretty
+            hits = sorted(out.glob(f"*{tid}*.csv"))
+            if not hits:
                 print(f"unknown table {tid}; try -t list", file=sys.stderr)
                 return 2
-            body = render_table(tid, whole, d2h, per_gate, positions, cudaq, nsys)
-            what, script = TABLES[tid]
-            print(f"\n## {tid}  {what}")
-            if body is None:
-                print(f"   no data for this table in {args.paths[0]}.")
-                print(f"   run:  single_gate/jobs/{script}")
-                failed.append(tid)
+            print(f"\n## {tid}")
+            with hits[0].open(newline="") as f:
+                rows = list(csv.DictReader(f))
+            if rows:
+                print(table(rows, list(rows[0].keys())))
             else:
-                print(body)
+                print(f"   empty: {hits[0]}")
         return 0 if not failed else 1
 
     print_tables_index()
